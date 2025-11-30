@@ -1,119 +1,97 @@
 import azure.functions as func
+from openai import OpenAI
+from huggingface_hub import InferenceClient
+import os
 import logging
-import traceback
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    """
-    SUPER DEBUG VERSION - Shows exactly where it breaks
-    """
-    error_log = []
+    logging.info('Python HTTP trigger function processed a request.')
     
     try:
-        error_log.append("Step 1: Starting function")
-        logging.info("Step 1: Function started")
+        req_body = req.get_json()
+        user_text = req_body.get('text')
         
-        # Test request parsing
-        error_log.append("Step 2: Parsing request")
-        try:
-            req_body = req.get_json()
-            user_text = req_body.get('text', 'test')
-            error_log.append(f"Step 2 OK: Got text '{user_text}'")
-        except Exception as e:
-            error_log.append(f"Step 2 FAILED: {str(e)}")
-            raise
+        if not user_text:
+            return func.HttpResponse(
+                "Please provide 'text' in request body",
+                status_code=400
+            )
         
-        # Test os import
-        error_log.append("Step 3: Importing os")
-        try:
-            import os
-            error_log.append("Step 3 OK: os imported")
-        except Exception as e:
-            error_log.append(f"Step 3 FAILED: {str(e)}")
-            raise
+        logging.info(f'User text: {user_text}')
         
-        # Test environment variables
-        error_log.append("Step 4: Checking environment variables")
-        try:
-            hf_token = os.environ.get("HF_TOKEN")
-            xai_key = os.environ.get("XAI_API_KEY")
-            error_log.append(f"Step 4: HF_TOKEN exists: {hf_token is not None}")
-            error_log.append(f"Step 4: XAI_API_KEY exists: {xai_key is not None}")
+        # ============================================
+        # GROK PROMPT - EDIT HERE
+        # ============================================
+        xai_client = OpenAI(
+            api_key=os.environ.get("XAI_API_KEY"),
+            base_url="https://api.x.ai/v1"
+        )
+        
+        # You can add a system message to control Grok's behavior
+        chat_response = xai_client.chat.completions.create(
+            model="grok-4-1-fast",
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "You are a helpful, friendly AI assistant. Keep responses concise and conversational."
+                },
+                {
+                    "role": "user", 
+                    "content": user_text
+                }
+            ],
+            # Optional Grok parameters:
+            temperature=0.7,  # 0.0-2.0, higher = more creative
+            max_tokens=150,   # Limit response length
+            # top_p=0.9,      # Nucleus sampling
+        )
+        
+        response_text = chat_response.choices[0].message.content
+        logging.info(f'AI response: {response_text}')
+        
+        # ============================================
+        # TTS PARAMETERS - EDIT HERE
+        # ============================================
+        hf_client = InferenceClient(
+            provider="fal-ai",
+            api_key=os.environ.get("HF_TOKEN")
+        )
+        
+        audio_bytes = hf_client.text_to_speech(
+            response_text,
+            model="nari-labs/Dia-1.6B",
             
-            if not hf_token:
-                error_log.append("Step 4 ERROR: HF_TOKEN is missing!")
-                return func.HttpResponse(
-                    "\n".join(error_log) + "\n\nERROR: HF_TOKEN not found in environment",
-                    status_code=500
-                )
-            if not xai_key:
-                error_log.append("Step 4 ERROR: XAI_API_KEY is missing!")
-                return func.HttpResponse(
-                    "\n".join(error_log) + "\n\nERROR: XAI_API_KEY not found in environment",
-                    status_code=500
-                )
-            error_log.append("Step 4 OK: Both env vars exist")
-        except Exception as e:
-            error_log.append(f"Step 4 FAILED: {str(e)}")
-            raise
+            # Audio length (higher = can generate longer audio)
+            max_new_tokens=3072,  # 860-3072
+            
+            # How closely to follow the text (higher = more accurate to prompt)
+            cfg_scale=1.9,  # 1.0-5.0
+            
+            # Randomness (higher = more varied pronunciation)
+            temperature=1.6,  # 1.0-2.5
+            
+            # Vocabulary filtering (higher = more diverse words)
+            top_p=0.9,  # 0.7-1.0
+            
+            # CFG token filtering
+            cfg_filter_top_k=45,  # 15-100
+            
+            # Speech speed (1.0 = normal, lower = slower, higher = faster)
+            speed_factor=0.82  # 0.8-1.0
+        )
         
-        # Test huggingface_hub import
-        error_log.append("Step 5: Importing huggingface_hub")
-        try:
-            from huggingface_hub import InferenceClient
-            error_log.append("Step 5 OK: InferenceClient imported")
-        except Exception as e:
-            error_log.append(f"Step 5 FAILED: {str(e)}")
-            error_log.append("Step 5 ERROR: huggingface_hub not installed or wrong version")
-            return func.HttpResponse(
-                "\n".join(error_log) + f"\n\nERROR: Cannot import InferenceClient: {str(e)}",
-                status_code=500
-            )
-        
-        # Test InferenceClient initialization
-        error_log.append("Step 6: Creating InferenceClient")
-        try:
-            client = InferenceClient(
-                provider="fal-ai",
-                api_key=hf_token
-            )
-            error_log.append("Step 6 OK: InferenceClient created")
-        except Exception as e:
-            error_log.append(f"Step 6 FAILED: {str(e)}")
-            error_log.append(f"Step 6 ERROR: {traceback.format_exc()}")
-            return func.HttpResponse(
-                "\n".join(error_log) + f"\n\nERROR: Cannot create InferenceClient: {str(e)}",
-                status_code=500
-            )
-        
-        # Test TTS
-        error_log.append("Step 7: Calling text_to_speech")
-        try:
-            audio = client.text_to_speech(
-                "test",
-                model="nari-labs/Dia-1.6B"
-            )
-            error_log.append(f"Step 7 OK: TTS returned {len(audio)} bytes")
-        except Exception as e:
-            error_log.append(f"Step 7 FAILED: {str(e)}")
-            error_log.append(f"Step 7 ERROR: {traceback.format_exc()}")
-            return func.HttpResponse(
-                "\n".join(error_log) + f"\n\nERROR: TTS failed: {str(e)}",
-                status_code=500
-            )
-        
-        # Success!
-        error_log.append("SUCCESS: All steps passed!")
-        
+        # Return audio as response
         return func.HttpResponse(
-            "\n".join(error_log) + f"\n\n✅ SUCCESS! Audio size: {len(audio)} bytes",
+            audio_bytes,
+            mimetype="audio/wav",
             status_code=200
         )
         
     except Exception as e:
-        error_log.append(f"\nFATAL ERROR: {str(e)}")
-        error_log.append(f"\nTraceback:\n{traceback.format_exc()}")
-        
+        logging.error(f'Error: {str(e)}')
+        import traceback
+        logging.error(traceback.format_exc())
         return func.HttpResponse(
-            "\n".join(error_log),
+            f"Error: {str(e)}",
             status_code=500
         )
