@@ -3,6 +3,7 @@ from openai import OpenAI
 import requests
 import os
 import logging
+import json
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Python HTTP trigger function processed a request.')
@@ -19,9 +20,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
         logging.info(f'User text: {user_text}')
         
-        # ============================================
-        # EDIT GROK PROMPT HERE
-        # ============================================
+        # Get response from xAI Grok
         xai_client = OpenAI(
             api_key=os.environ.get("XAI_API_KEY"),
             base_url="https://api.x.ai/v1"
@@ -32,7 +31,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             messages=[
                 {
                     "role": "system",
-                    # ⬇️ EDIT THIS LINE
                     "content": "You are a helpful, friendly AI assistant. Keep responses concise and conversational."
                 },
                 {
@@ -47,44 +45,49 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         response_text = chat_response.choices[0].message.content
         logging.info(f'AI response: {response_text}')
         
-        # ============================================
-        # CALL FAL.AI DIRECTLY FOR CUSTOM PARAMETERS
-        # ============================================
-        fal_api_url = "https://queue.fal.run/fal-ai/nari-labs/Dia-1.6B"
+        # Use HuggingFace InferenceClient (works but no speed control)
+        # OR use direct fal.ai API call
         
-        headers = {
-            "Authorization": f"Key {os.environ.get('HF_TOKEN')}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "text": response_text,
-            # ⬇️ EDIT THESE PARAMETERS
-            "max_new_tokens": 3072,
-            "cfg_scale": 1.9,
-            "temperature": 1.6,
-            "top_p": 0.9,
-            "cfg_filter_top_k": 45,
-            "speed_factor": 0.7  # ⬅️ SLOWER (0.7 = 70% speed, lower = slower)
-        }
-        
-        logging.info(f'Calling fal.ai with speed_factor: {payload["speed_factor"]}')
-        
-        response = requests.post(fal_api_url, json=payload, headers=headers)
-        response.raise_for_status()
-        
-        # Get the audio URL from response
-        result = response.json()
-        audio_url = result.get("audio_url") or result.get("url")
-        
-        if audio_url:
-            # Download the audio
+        # Option 1: Try using fal Python client directly
+        try:
+            import fal_client
+            
+            result = fal_client.subscribe(
+                "fal-ai/nari-labs/Dia-1.6B",
+                arguments={
+                    "text": response_text,
+                    "speed_factor": 0.7,  # Slower speed
+                    "max_new_tokens": 3072,
+                    "cfg_scale": 1.9,
+                    "temperature": 1.6,
+                    "top_p": 0.9,
+                    "cfg_filter_top_k": 45
+                },
+                with_logs=True
+            )
+            
+            # Download audio from URL
+            audio_url = result.get("audio_url", {}).get("url")
+            logging.info(f'Audio URL: {audio_url}')
+            
             audio_response = requests.get(audio_url)
             audio_response.raise_for_status()
             audio_bytes = audio_response.content
-        else:
-            # Audio might be directly in response
-            audio_bytes = result.get("audio", b"")
+            
+        except ImportError:
+            logging.warning("fal_client not available, falling back to InferenceClient")
+            # Fallback to basic InferenceClient (no speed control)
+            from huggingface_hub import InferenceClient
+            
+            hf_client = InferenceClient(
+                provider="fal-ai",
+                api_key=os.environ.get("HF_TOKEN")
+            )
+            
+            audio_bytes = hf_client.text_to_speech(
+                response_text,
+                model="nari-labs/Dia-1.6B"
+            )
         
         # Return audio as response
         return func.HttpResponse(
@@ -96,8 +99,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error(f'Error: {str(e)}')
         import traceback
-        logging.error(traceback.format_exc())
+        tb = traceback.format_exc()
+        logging.error(f'Full traceback: {tb}')
         return func.HttpResponse(
-            f"Error: {str(e)}",
+            f"Error: {str(e)}\n\nTraceback:\n{tb}",
             status_code=500
         )
