@@ -2,4 +2,3 @@ azure-functions
 openai
 huggingface-hub
 requests
-fal-client
