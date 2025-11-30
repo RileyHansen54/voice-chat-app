@@ -31,7 +31,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
         logging.info('Calling xAI API...')
         chat_response = xai_client.chat.completions.create(
-            model="grok-beta",
+            model="grok-4-1-fast",
             messages=[{"role": "user", "content": user_text}]
         )
         
