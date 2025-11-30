@@ -24,16 +24,17 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f'User text: {user_text}')
         
         # ============================================
-        # INITIALIZE CLIENTS
+        # INITIALIZE CLIENTS (CORRECTED SYNTAX)
         # ============================================
         xai_client = OpenAI(
-            api_key=os.environ.get("XAI_API_KEY"),
+            api_key=os.environ["XAI_API_KEY"],
             base_url="https://api.x.ai/v1"
         )
         
+        # FIXED: Correct HuggingFace InferenceClient syntax
         hf_client = InferenceClient(
             provider="fal-ai",
-            api_key=os.environ.get("HF_TOKEN")
+            api_key=os.environ["HF_TOKEN"]
         )
         
         # ============================================
@@ -117,10 +118,13 @@ Remember: You're speaking out loud, so write as you would naturally talk, not as
             index, sentence = sentence_data
             try:
                 logging.info(f'[TTS {index+1}/{len(sentences)}] Processing...')
+                
+                # Use the exact syntax from HuggingFace docs
                 audio = hf_client.text_to_speech(
                     sentence,
                     model="nari-labs/Dia-1.6B"
                 )
+                
                 logging.info(f'[TTS {index+1}/{len(sentences)}] ✓ Generated {len(audio)} bytes')
                 return (index, audio)
             except Exception as e:
@@ -159,6 +163,14 @@ Remember: You're speaking out loud, so write as you would naturally talk, not as
             status_code=200
         )
         
+    except KeyError as e:
+        # Missing environment variable
+        error_msg = f"Missing environment variable: {str(e)}"
+        logging.error(error_msg)
+        return func.HttpResponse(
+            error_msg,
+            status_code=500
+        )
     except Exception as e:
         logging.error(f'ERROR: {str(e)}')
         import traceback
