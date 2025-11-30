@@ -19,39 +19,21 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
         logging.info(f'User text: {user_text}')
         
-        # ============================================
-        # GROK PROMPT - EDIT HERE
-        # ============================================
+        # Get response from xAI Grok
         xai_client = OpenAI(
             api_key=os.environ.get("XAI_API_KEY"),
             base_url="https://api.x.ai/v1"
         )
         
-        # You can add a system message to control Grok's behavior
         chat_response = xai_client.chat.completions.create(
             model="grok-4-1-fast",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "You are a helpful, friendly AI assistant. Keep responses concise and conversational."
-                },
-                {
-                    "role": "user", 
-                    "content": user_text
-                }
-            ],
-            # Optional Grok parameters:
-            temperature=0.7,  # 0.0-2.0, higher = more creative
-            max_tokens=150,   # Limit response length
-            # top_p=0.9,      # Nucleus sampling
+            messages=[{"role": "user", "content": user_text}]
         )
         
         response_text = chat_response.choices[0].message.content
         logging.info(f'AI response: {response_text}')
         
-        # ============================================
-        # TTS PARAMETERS - EDIT HERE
-        # ============================================
+        # Convert to speech using Hugging Face Nari Labs Dia
         hf_client = InferenceClient(
             provider="fal-ai",
             api_key=os.environ.get("HF_TOKEN")
@@ -59,25 +41,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
         audio_bytes = hf_client.text_to_speech(
             response_text,
-            model="nari-labs/Dia-1.6B",
-            
-            # Audio length (higher = can generate longer audio)
-            max_new_tokens=3072,  # 860-3072
-            
-            # How closely to follow the text (higher = more accurate to prompt)
-            cfg_scale=1.9,  # 1.0-5.0
-            
-            # Randomness (higher = more varied pronunciation)
-            temperature=1.6,  # 1.0-2.5
-            
-            # Vocabulary filtering (higher = more diverse words)
-            top_p=0.9,  # 0.7-1.0
-            
-            # CFG token filtering
-            cfg_filter_top_k=45,  # 15-100
-            
-            # Speech speed (1.0 = normal, lower = slower, higher = faster)
-            speed_factor=0.82  # 0.8-1.0
+            model="nari-labs/Dia-1.6B"
         )
         
         # Return audio as response
