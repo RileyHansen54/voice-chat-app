@@ -1,6 +1,6 @@
 import azure.functions as func
 from openai import OpenAI
-from huggingface_hub import InferenceClient
+import requests
 import os
 import logging
 
@@ -32,42 +32,59 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             messages=[
                 {
                     "role": "system",
-                    # ⬇️ EDIT THIS LINE - Change Grok's personality/behavior
-                    "content": "You are a helpful, friendly online Tutor. Keep responses conversational and upbeat. You laugh, pause, and are reactive to responses but only when the moment is right and in a normal casual way."
+                    # ⬇️ EDIT THIS LINE
+                    "content": "You are a helpful, friendly AI assistant. Keep responses concise and conversational."
                 },
                 {
                     "role": "user",
                     "content": user_text
                 }
             ],
-            # Optional Grok parameters:
-            temperature=0.7,  # 0.0-2.0 (higher = more creative/random)
-            max_tokens=150,   # Maximum response length in tokens
+            temperature=0.7,
+            max_tokens=150,
         )
         
         response_text = chat_response.choices[0].message.content
         logging.info(f'AI response: {response_text}')
         
         # ============================================
-        # EDIT TTS PARAMETERS HERE
+        # CALL FAL.AI DIRECTLY FOR CUSTOM PARAMETERS
         # ============================================
-        hf_client = InferenceClient(
-            provider="fal-ai",
-            api_key=os.environ.get("HF_TOKEN")
-        )
+        fal_api_url = "https://queue.fal.run/fal-ai/nari-labs/Dia-1.6B"
         
-        audio_bytes = hf_client.text_to_speech(
-            response_text,
-            model="nari-labs/Dia-1.6B",
-            
+        headers = {
+            "Authorization": f"Key {os.environ.get('HF_TOKEN')}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "text": response_text,
             # ⬇️ EDIT THESE PARAMETERS
-            max_new_tokens=3072,      # Audio length: 860-3072 (higher = can generate longer audio)
-            cfg_scale=1.9,            # Text adherence: 1.0-5.0 (higher = follows text more closely)
-            temperature=1.6,          # Randomness: 1.0-2.5 (higher = more varied pronunciation)
-            top_p=0.7,                # Vocabulary diversity: 0.7-1.0 (higher = more diverse)
-            cfg_filter_top_k=25,      # CFG filtering: 15-100
-            speed_factor=0.80        # Speech speed: 0.8-1.0 (1.0 = normal, lower = slower/clearer)
-        )
+            "max_new_tokens": 3072,
+            "cfg_scale": 1.9,
+            "temperature": 1.6,
+            "top_p": 0.9,
+            "cfg_filter_top_k": 45,
+            "speed_factor": 0.7  # ⬅️ SLOWER (0.7 = 70% speed, lower = slower)
+        }
+        
+        logging.info(f'Calling fal.ai with speed_factor: {payload["speed_factor"]}')
+        
+        response = requests.post(fal_api_url, json=payload, headers=headers)
+        response.raise_for_status()
+        
+        # Get the audio URL from response
+        result = response.json()
+        audio_url = result.get("audio_url") or result.get("url")
+        
+        if audio_url:
+            # Download the audio
+            audio_response = requests.get(audio_url)
+            audio_response.raise_for_status()
+            audio_bytes = audio_response.content
+        else:
+            # Audio might be directly in response
+            audio_bytes = result.get("audio", b"")
         
         # Return audio as response
         return func.HttpResponse(
