@@ -1,7 +1,6 @@
 import azure.functions as func
 from openai import OpenAI
-import fal_client
-import requests
+from huggingface_hub import InferenceClient
 import os
 import logging
 
@@ -20,7 +19,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
         logging.info(f'User text: {user_text}')
         
-        # Get response from xAI Grok
+        # ============================================
+        # EDIT GROK PROMPT HERE
+        # ============================================
         xai_client = OpenAI(
             api_key=os.environ.get("XAI_API_KEY"),
             base_url="https://api.x.ai/v1"
@@ -31,6 +32,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             messages=[
                 {
                     "role": "system",
+                    # ⬇️ EDIT GROK'S PERSONALITY HERE
                     "content": "You are a helpful, friendly AI assistant. Keep responses concise and conversational."
                 },
                 {
@@ -38,38 +40,25 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
                     "content": user_text
                 }
             ],
-            temperature=0.7,
-            max_tokens=150,
+            temperature=0.7,  # 0.0-2.0 (higher = more creative)
+            max_tokens=150,   # Max response length
         )
         
         response_text = chat_response.choices[0].message.content
         logging.info(f'AI response: {response_text}')
         
-        # Set FAL_KEY for the client
-        os.environ["FAL_KEY"] = os.environ.get("FAL_KEY")
-        
-        # Use fal.ai with speed control
-        result = fal_client.subscribe(
-            "fal-ai/nari-labs/Dia-1.6B",
-            arguments={
-                "text": response_text,
-                "speed_factor": 0.7,  # ⬅️ EDIT THIS: 0.5-1.0 (lower = slower)
-                "max_new_tokens": 3072,
-                "cfg_scale": 1.9,
-                "temperature": 1.6,
-                "top_p": 0.9,
-                "cfg_filter_top_k": 45
-            },
-            with_logs=True
+        # ============================================
+        # TTS - USING KOKORO MODEL
+        # ============================================
+        hf_client = InferenceClient(
+            provider="fal-ai",
+            api_key=os.environ.get("HF_TOKEN")
         )
         
-        # Download audio from URL
-        audio_url = result.get("audio_url", {}).get("url")
-        logging.info(f'Audio URL: {audio_url}')
-        
-        audio_response = requests.get(audio_url)
-        audio_response.raise_for_status()
-        audio_bytes = audio_response.content
+        audio_bytes = hf_client.text_to_speech(
+            response_text,
+            model="hexgrad/Kokoro-82M"  # Changed to Kokoro
+        )
         
         # Return audio as response
         return func.HttpResponse(
@@ -81,9 +70,8 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
     except Exception as e:
         logging.error(f'Error: {str(e)}')
         import traceback
-        tb = traceback.format_exc()
-        logging.error(f'Full traceback: {tb}')
+        logging.error(traceback.format_exc())
         return func.HttpResponse(
-            f"Error: {str(e)}\n\nTraceback:\n{tb}",
+            f"Error: {str(e)}",
             status_code=500
         )
