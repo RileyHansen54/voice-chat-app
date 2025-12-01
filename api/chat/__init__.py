@@ -27,13 +27,25 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
         chat_response = xai_client.chat.completions.create(
             model="grok-4-1-fast",
-            messages=[{"role": "user", "content": user_text}]
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a LLM designed to take an input and to create a prompt/dialog/response for Lara a teacher assistant. You use these tags to symbolize emotion and events based on the dialog (laughs), (clears throat), (sighs), (gasps), (coughs), (singing), (sings), (mumbles), (beep), (groans), (sniffs), (claps), (screams), (inhales), (exhales), (applause), (burps), (humming), (sneezes), (chuckle), (whistles), and ... to symbolize pause. You need not use them all the time but only when the dialog call for it."
+                },
+                {
+                    "role": "user",
+                    "content": user_text
+                }
+            ],
+            temperature=0.7,
+            max_tokens=5000,
         )
         
         response_text = chat_response.choices[0].message.content
         logging.info(f'AI response: {response_text}')
         
         # Convert to speech using Hugging Face Nari Labs Dia
+        # NOTE: InferenceClient doesn't support the advanced parameters through the API
         hf_client = InferenceClient(
             provider="fal-ai",
             api_key=os.environ.get("HF_TOKEN")
@@ -42,6 +54,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         audio_bytes = hf_client.text_to_speech(
             response_text,
             model="nari-labs/Dia-1.6B"
+            # No additional parameters - they're not supported via InferenceClient
         )
         
         # Return audio as response
