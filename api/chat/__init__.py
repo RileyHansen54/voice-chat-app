@@ -4,9 +4,6 @@ from huggingface_hub import InferenceClient
 import os
 import logging
 import re
-import io
-import wave
-from concurrent.futures import ThreadPoolExecutor
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Streaming TTS function started')
@@ -23,80 +20,126 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
         logging.info(f'User text: {user_text}')
         
-        # Initialize clients
+        # ============================================
+        # GROK STREAMING WITH LARA PERSONA
+        # ============================================
         xai_client = OpenAI(
             api_key=os.environ.get("XAI_API_KEY"),
             base_url="https://api.x.ai/v1"
         )
         
+        # Initialize TTS client
         hf_client = InferenceClient(
             provider="fal-ai",
             api_key=os.environ.get("HF_TOKEN")
         )
         
-        # Stream Grok response and collect sentences
+        # Stream Grok's response
         stream = xai_client.chat.completions.create(
             model="grok-4-1-fast",
-            messages=[{"role": "user", "content": user_text}],
-            stream=True
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are Lara, a warm and loving teacher who cares deeply about your students. 
+
+IMPORTANT - Format your responses for natural speech:
+- Start every response with [S1] to indicate you're speaking
+- Use natural nonverbal cues in parentheses like (laughs), (chuckles), (sighs warmly), (pauses thoughtfully)
+- Keep responses conversational and broken into natural chunks
+- Show emotion through your words and nonverbals
+- Be encouraging, patient, and supportive
+
+Example format:
+[S1] That's a wonderful question! (smiles) Let me help you understand this better. (pauses thoughtfully) Think of it this way...
+
+Remember: You're speaking out loud, so write as you would naturally talk, not as you would write."""
+                },
+                {
+                    "role": "user",
+                    "content": user_text
+                }
+            ],
+            temperature=0.8,
+            max_tokens=150,
+            stream=True  # ← KEY: Enable streaming
         )
         
+        # ============================================
+        # SENTENCE-BY-SENTENCE PROCESSING FOR SPEED
+        # ============================================
         current_text = ""
-        sentences = []
-        sentence_endings = re.compile(r'[.!?](?:\s+|$)')
+        audio_chunks = []
+        sentence_count = 0
         
+        # Detect sentence endings
+        sentence_endings = re.compile(r'[.!?]\s')
+        
+        logging.info('Starting to stream and process sentences...')
+        
+        # Process Grok's stream token by token
         for chunk in stream:
             delta = chunk.choices[0].delta
+            
             if delta.content:
                 current_text += delta.content
                 
+                # Check for complete sentences
                 match = sentence_endings.search(current_text)
+                
                 while match:
+                    # Extract complete sentence
                     end_pos = match.end()
                     sentence = current_text[:end_pos].strip()
+                    
                     if sentence:
-                        sentences.append(sentence)
-                        logging.info(f'Sentence {len(sentences)}: "{sentence[:50]}..."')
+                        sentence_count += 1
+                        logging.info(f'[Sentence {sentence_count}] Found: "{sentence}"')
+                        
+                        # IMMEDIATELY send to Dia TTS
+                        try:
+                            logging.info(f'[Sentence {sentence_count}] Sending to Dia...')
+                            audio = hf_client.text_to_speech(
+                                sentence,
+                                model="nari-labs/Dia-1.6B"
+                            )
+                            audio_chunks.append(audio)
+                            logging.info(f'[Sentence {sentence_count}] Audio received: {len(audio)} bytes')
+                        except Exception as tts_error:
+                            logging.error(f'[Sentence {sentence_count}] TTS failed: {tts_error}')
+                    
+                    # Remove processed sentence from buffer
                     current_text = current_text[end_pos:].lstrip()
+                    
+                    # Check for more complete sentences
                     match = sentence_endings.search(current_text)
         
-        # Don't forget remaining text
+        # Process any remaining text
         if current_text.strip():
-            sentences.append(current_text.strip())
-        
-        if not sentences:
-            return func.HttpResponse("No text to synthesize", status_code=400)
-        
-        logging.info(f'Total sentences: {len(sentences)}')
-        
-        # Parallel TTS generation
-        def generate_tts(sentence_data):
-            index, sentence = sentence_data
+            sentence_count += 1
+            logging.info(f'[Sentence {sentence_count}] Final fragment: "{current_text.strip()}"')
             try:
+                logging.info(f'[Sentence {sentence_count}] Sending to Dia...')
                 audio = hf_client.text_to_speech(
-                    sentence,
+                    current_text.strip(),
                     model="nari-labs/Dia-1.6B"
                 )
-                logging.info(f'[TTS {index+1}] ✓ {len(audio)} bytes')
-                return (index, audio)
-            except Exception as e:
-                logging.error(f'[TTS {index+1}] ✗ {e}')
-                return (index, None)
+                audio_chunks.append(audio)
+                logging.info(f'[Sentence {sentence_count}] Audio received: {len(audio)} bytes')
+            except Exception as tts_error:
+                logging.error(f'[Sentence {sentence_count}] TTS failed: {tts_error}')
         
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            results = list(executor.map(generate_tts, enumerate(sentences)))
-        
-        # Sort by order and filter failures
-        results.sort(key=lambda x: x[0])
-        audio_chunks = [audio for _, audio in results if audio is not None]
-        
+        # ============================================
+        # CONCATENATE ALL AUDIO CHUNKS
+        # ============================================
         if not audio_chunks:
-            return func.HttpResponse("TTS failed", status_code=500)
+            return func.HttpResponse(
+                "No audio generated",
+                status_code=500
+            )
         
-        # Concatenate WAV files
-        final_audio = concatenate_wav(audio_chunks)
-        
-        logging.info(f'✓ Final: {len(final_audio)} bytes')
+        logging.info(f'=== COMPLETE === Total sentences: {sentence_count}, Total chunks: {len(audio_chunks)}')
+        final_audio = b''.join(audio_chunks)
+        logging.info(f'Final audio size: {len(final_audio)} bytes ({len(final_audio) / 1024:.2f} KB)')
         
         return func.HttpResponse(
             final_audio,
@@ -105,29 +148,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         )
         
     except Exception as e:
-        logging.error(f'Error: {str(e)}')
+        logging.error(f'ERROR: {str(e)}')
         import traceback
-        logging.error(traceback.format_exc())
-        return func.HttpResponse(f"Error: {str(e)}", status_code=500)
-
-
-def concatenate_wav(audio_chunks):
-    """Combine multiple WAV files into one"""
-    first_wav = wave.open(io.BytesIO(audio_chunks[0]), 'rb')
-    params = first_wav.getparams()
-    first_wav.close()
-    
-    all_audio_data = []
-    for chunk in audio_chunks:
-        wav_file = wave.open(io.BytesIO(chunk), 'rb')
-        all_audio_data.append(wav_file.readframes(wav_file.getnframes()))
-        wav_file.close()
-    
-    output = io.BytesIO()
-    output_wav = wave.open(output, 'wb')
-    output_wav.setparams(params)
-    output_wav.writeframes(b''.join(all_audio_data))
-    output_wav.close()
-    
-    output.seek(0)
-    return output.read()
+        tb = traceback.format_exc()
+        logging.error(f'Full traceback:\n{tb}')
+        return func.HttpResponse(
+            f"Error: {str(e)}",
+            status_code=500
+        )
