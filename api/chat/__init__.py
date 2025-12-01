@@ -3,9 +3,12 @@ from openai import OpenAI
 from huggingface_hub import InferenceClient
 import os
 import logging
+import re
+import io
+import wave
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
-    logging.info('Python HTTP trigger function processed a request.')
+    logging.info('Streaming TTS function started')
     
     try:
         req_body = req.get_json()
@@ -19,56 +22,176 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
         logging.info(f'User text: {user_text}')
         
-        # Get response from xAI Grok
+        # ============================================
+        # GROK STREAMING WITH LARA PERSONA
+        # ============================================
         xai_client = OpenAI(
             api_key=os.environ.get("XAI_API_KEY"),
             base_url="https://api.x.ai/v1"
         )
         
-        chat_response = xai_client.chat.completions.create(
+        # Initialize TTS client (CORRECTED)
+        hf_client = InferenceClient(
+            token=os.environ.get("HF_TOKEN")
+        )
+        
+        # Stream Grok's response
+        stream = xai_client.chat.completions.create(
             model="grok-4-1-fast",
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a LLM designed to take an input and to create a prompt/dialog/response for Lara a teacher assistant. You use these tags to symbolize emotion and events based on the dialog (laughs), (clears throat), (sighs), (gasps), (coughs), (singing), (sings), (mumbles), (beep), (groans), (sniffs), (claps), (screams), (inhales), (exhales), (applause), (burps), (humming), (sneezes), (chuckle), (whistles), and ... to symbolize pause. You need not use them all the time but only when the dialog call for it."
+                    "content": """You are a LLM designed to take an input and to create a prompt/dialog/response for Lara a teacher assistant. You use these tags to symbolize emotion and events based on the dialog (laughs), (clears throat), (sighs), (gasps), (coughs), (singing), (sings), (mumbles), (beep), (groans), (sniffs), (claps), (screams), (inhales), (exhales), (applause), (burps), (humming), (sneezes), (chuckle), (whistles), and ... to symbolize pause. You need not use them all the time but only when the dialog call for it."
+ 
+
+IMPORTANT - Format your responses for natural speech:
+- Start every response with [S1] to indicate you're speaking
+- Use natural nonverbal cues in parentheses like (laughs), (chuckles), (sighs warmly), (pauses thoughtfully)
+- Keep responses conversational and broken into natural chunks
+- Show emotion through your words and nonverbals
+- Be encouraging, patient, and supportive
+
+Example format:
+[S1] That's a wonderful question! (smiles) Let me help you understand this better. (pauses thoughtfully) Think of it this way...
+
+Remember: You're speaking out loud, so write as you would naturally talk, not as you would write."""
                 },
                 {
                     "role": "user",
                     "content": user_text
                 }
             ],
-            temperature=0.7,
-            max_tokens=5000,
+            temperature=0.8,
+            max_tokens=1000,
+            stream=True
         )
         
-        response_text = chat_response.choices[0].message.content
-        logging.info(f'AI response: {response_text}')
+        # ============================================
+        # SENTENCE-BY-SENTENCE PROCESSING FOR SPEED
+        # ============================================
+        current_text = ""
+        audio_chunks = []
+        sentence_count = 0
         
-        # Convert to speech using Hugging Face Nari Labs Dia
-        # NOTE: InferenceClient doesn't support the advanced parameters through the API
-        hf_client = InferenceClient(
-            provider="fal-ai",
-            api_key=os.environ.get("HF_TOKEN")
-        )
+        # Detect sentence endings
+        sentence_endings = re.compile(r'[.!?]\s')
         
-        audio_bytes = hf_client.text_to_speech(
-            response_text,
-            model="nari-labs/Dia-1.6B"
-            # No additional parameters - they're not supported via InferenceClient
-        )
+        logging.info('Starting to stream and process sentences...')
         
-        # Return audio as response
+        # Process Grok's stream token by token
+        for chunk in stream:
+            delta = chunk.choices[0].delta
+            
+            if delta.content:
+                current_text += delta.content
+                
+                # Check for complete sentences
+                match = sentence_endings.search(current_text)
+                
+                while match:
+                    # Extract complete sentence
+                    end_pos = match.end()
+                    sentence = current_text[:end_pos].strip()
+                    
+                    if sentence:
+                        sentence_count += 1
+                        logging.info(f'[Sentence {sentence_count}] Found: "{sentence}"')
+                        
+                        # IMMEDIATELY send to Dia TTS
+                        try:
+                            logging.info(f'[Sentence {sentence_count}] Sending to Dia...')
+                            
+                            # Call HF Inference API with Dia model
+                            audio = hf_client.text_to_speech(
+                                text=sentence,
+                                model="nari-labs/Dia-1.6B"
+                            )
+                            
+                            audio_chunks.append(audio)
+                            logging.info(f'[Sentence {sentence_count}] Audio received: {len(audio)} bytes')
+                            
+                        except Exception as tts_error:
+                            logging.error(f'[Sentence {sentence_count}] TTS failed: {tts_error}')
+                            # Continue processing other sentences even if one fails
+                    
+                    # Remove processed sentence from buffer
+                    current_text = current_text[end_pos:].lstrip()
+                    
+                    # Check for more complete sentences
+                    match = sentence_endings.search(current_text)
+        
+        # Process any remaining text
+        if current_text.strip():
+            sentence_count += 1
+            logging.info(f'[Sentence {sentence_count}] Final fragment: "{current_text.strip()}"')
+            try:
+                logging.info(f'[Sentence {sentence_count}] Sending to Dia...')
+                audio = hf_client.text_to_speech(
+                    text=current_text.strip(),
+                    model="nari-labs/Dia-1.6B"
+                )
+                audio_chunks.append(audio)
+                logging.info(f'[Sentence {sentence_count}] Audio received: {len(audio)} bytes')
+            except Exception as tts_error:
+                logging.error(f'[Sentence {sentence_count}] TTS failed: {tts_error}')
+        
+        # ============================================
+        # CONCATENATE AUDIO CHUNKS PROPERLY
+        # ============================================
+        if not audio_chunks:
+            return func.HttpResponse(
+                "No audio generated",
+                status_code=500
+            )
+        
+        logging.info(f'=== COMPLETE === Total sentences: {sentence_count}, Total chunks: {len(audio_chunks)}')
+        
+        # Properly concatenate WAV files
+        final_audio = concatenate_wav_bytes(audio_chunks)
+        
+        logging.info(f'Final audio size: {len(final_audio)} bytes ({len(final_audio) / 1024:.2f} KB)')
+        
         return func.HttpResponse(
-            audio_bytes,
+            final_audio,
             mimetype="audio/wav",
             status_code=200
         )
         
     except Exception as e:
-        logging.error(f'Error: {str(e)}')
+        logging.error(f'ERROR: {str(e)}')
         import traceback
-        logging.error(traceback.format_exc())
+        tb = traceback.format_exc()
+        logging.error(f'Full traceback:\n{tb}')
         return func.HttpResponse(
             f"Error: {str(e)}",
             status_code=500
         )
+
+
+def concatenate_wav_bytes(audio_chunks):
+    """
+    Properly concatenate multiple WAV audio byte chunks.
+    Removes headers from all but the first chunk.
+    """
+    if len(audio_chunks) == 1:
+        return audio_chunks[0]
+    
+    # Read first WAV to get parameters
+    first_wav = wave.open(io.BytesIO(audio_chunks[0]), 'rb')
+    params = first_wav.getparams()
+    
+    # Create output WAV in memory
+    output = io.BytesIO()
+    output_wav = wave.open(output, 'wb')
+    output_wav.setparams(params)
+    
+    # Write all audio data
+    for chunk in audio_chunks:
+        wav = wave.open(io.BytesIO(chunk), 'rb')
+        output_wav.writeframes(wav.readframes(wav.getnframes()))
+        wav.close()
+    
+    output_wav.close()
+    first_wav.close()
+    
+    return output.getvalue()
