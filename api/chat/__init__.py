@@ -4,6 +4,8 @@ from huggingface_hub import InferenceClient
 import os
 import logging
 import re
+import io
+import wave
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info('Streaming TTS function started')
@@ -28,10 +30,9 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             base_url="https://api.x.ai/v1"
         )
         
-        # Initialize TTS client
+        # Initialize TTS client (CORRECTED)
         hf_client = InferenceClient(
-            provider="fal-ai",
-            api_key=os.environ.get("HF_TOKEN")
+            token=os.environ.get("HF_TOKEN")
         )
         
         # Stream Grok's response
@@ -61,7 +62,7 @@ Remember: You're speaking out loud, so write as you would naturally talk, not as
             ],
             temperature=0.8,
             max_tokens=150,
-            stream=True  # ← KEY: Enable streaming
+            stream=True
         )
         
         # ============================================
@@ -98,14 +99,19 @@ Remember: You're speaking out loud, so write as you would naturally talk, not as
                         # IMMEDIATELY send to Dia TTS
                         try:
                             logging.info(f'[Sentence {sentence_count}] Sending to Dia...')
+                            
+                            # Call HF Inference API with Dia model
                             audio = hf_client.text_to_speech(
-                                sentence,
+                                text=sentence,
                                 model="nari-labs/Dia-1.6B"
                             )
+                            
                             audio_chunks.append(audio)
                             logging.info(f'[Sentence {sentence_count}] Audio received: {len(audio)} bytes')
+                            
                         except Exception as tts_error:
                             logging.error(f'[Sentence {sentence_count}] TTS failed: {tts_error}')
+                            # Continue processing other sentences even if one fails
                     
                     # Remove processed sentence from buffer
                     current_text = current_text[end_pos:].lstrip()
@@ -120,7 +126,7 @@ Remember: You're speaking out loud, so write as you would naturally talk, not as
             try:
                 logging.info(f'[Sentence {sentence_count}] Sending to Dia...')
                 audio = hf_client.text_to_speech(
-                    current_text.strip(),
+                    text=current_text.strip(),
                     model="nari-labs/Dia-1.6B"
                 )
                 audio_chunks.append(audio)
@@ -129,7 +135,7 @@ Remember: You're speaking out loud, so write as you would naturally talk, not as
                 logging.error(f'[Sentence {sentence_count}] TTS failed: {tts_error}')
         
         # ============================================
-        # CONCATENATE ALL AUDIO CHUNKS
+        # CONCATENATE AUDIO CHUNKS PROPERLY
         # ============================================
         if not audio_chunks:
             return func.HttpResponse(
@@ -138,7 +144,10 @@ Remember: You're speaking out loud, so write as you would naturally talk, not as
             )
         
         logging.info(f'=== COMPLETE === Total sentences: {sentence_count}, Total chunks: {len(audio_chunks)}')
-        final_audio = b''.join(audio_chunks)
+        
+        # Properly concatenate WAV files
+        final_audio = concatenate_wav_bytes(audio_chunks)
+        
         logging.info(f'Final audio size: {len(final_audio)} bytes ({len(final_audio) / 1024:.2f} KB)')
         
         return func.HttpResponse(
@@ -156,3 +165,32 @@ Remember: You're speaking out loud, so write as you would naturally talk, not as
             f"Error: {str(e)}",
             status_code=500
         )
+
+
+def concatenate_wav_bytes(audio_chunks):
+    """
+    Properly concatenate multiple WAV audio byte chunks.
+    Removes headers from all but the first chunk.
+    """
+    if len(audio_chunks) == 1:
+        return audio_chunks[0]
+    
+    # Read first WAV to get parameters
+    first_wav = wave.open(io.BytesIO(audio_chunks[0]), 'rb')
+    params = first_wav.getparams()
+    
+    # Create output WAV in memory
+    output = io.BytesIO()
+    output_wav = wave.open(output, 'wb')
+    output_wav.setparams(params)
+    
+    # Write all audio data
+    for chunk in audio_chunks:
+        wav = wave.open(io.BytesIO(chunk), 'rb')
+        output_wav.writeframes(wav.readframes(wav.getnframes()))
+        wav.close()
+    
+    output_wav.close()
+    first_wav.close()
+    
+    return output.getvalue()
